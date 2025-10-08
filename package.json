@@ -1,0 +1,73 @@
+{
+  "name": "mac-clipboard",
+  "private": true,
+  "version": "0.0.0",
+  "description": "A small clipboard manager built with Electron and Vite",
+  "author": "",
+  "type": "module",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "electron": "electron .",
+    "electron:dev": "vite --mode development",
+    "electron:build": "bun run build && electron-builder",
+    "electron:pack": "electron-builder --dir"
+  },
+  "dependencies": {
+    "electron-store": "^11.0.2",
+    "globalthis-polyfill": "^1.0.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@types/node": "^24.6.0",
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react-swc": "^4.1.0",
+    "electron": "^38.2.2",
+    "electron-builder": "^26.0.12",
+    "eslint": "^9.36.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.22",
+    "globals": "^16.4.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.45.0",
+    "vite": "npm:rolldown-vite@7.1.14",
+    "vite-plugin-electron": "^0.29.0"
+  },
+  "overrides": {
+    "vite": "npm:rolldown-vite@7.1.14"
+  },
+  "build": {
+    "appId": "com.example.mac-clipboard",
+    "productName": "Clipboard Manager",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "public/**/*"
+    ],
+    "mac": {
+      "identity": null,
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg", "arch": ["x64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ],
+      "icon": "public/icon.icns",
+      "artifactName": "Clipboard Manager-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "Clipboard Manager",
+      "icon": "public/icon.icns",
+      "format": "UDZO"
+    },
+    "publish": null
+  }
+}
