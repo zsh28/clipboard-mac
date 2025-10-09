@@ -1,7 +1,7 @@
 {
   "name": "mac-clipboard",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "A small clipboard manager built with Electron and Vite",
   "author": "",
   "type": "module",
