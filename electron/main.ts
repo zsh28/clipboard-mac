@@ -22,7 +22,9 @@ class ClipboardManager {
   private clipboardHistory: ClipboardItem[] = []
   private lastTextContent: string = ''
   private lastImageHash: string = ''
+  private lastHtmlContent: string = ''
   private pollInterval: NodeJS.Timeout | null = null
+  private isInternalCopy: boolean = false
 
   constructor() {
     this.store = new Store<{ history: ClipboardItem[] }>({
@@ -45,10 +47,16 @@ class ClipboardManager {
   private addToHistory(content: string, type: 'text' | 'image' | 'html') {
     if (!content) return
 
-    // Check if this content is identical to the most recent item
-    if (this.clipboardHistory.length > 0) {
-      const lastItem = this.clipboardHistory[0]
-      if (lastItem.content === content && lastItem.type === type) {
+    // Skip if this is an internal copy operation
+    if (this.isInternalCopy) {
+      console.log('Skipping internal copy operation')
+      return
+    }
+
+    // Check if this content is identical to any of the recent items (check top 3)
+    const recentItems = this.clipboardHistory.slice(0, 3)
+    for (const item of recentItems) {
+      if (item.content === content && item.type === type) {
         console.log('Skipping duplicate content')
         return
       }
@@ -63,6 +71,7 @@ class ClipboardManager {
       timestamp: Date.now(),
       preview: type === 'text' ? content.substring(0, 100) : 
                type === 'image' ? 'Image' : 
+               type === 'html' ? content.replace(/<[^>]*>/g, '').substring(0, 100) : // Strip HTML tags for preview
                `${type} content`
     }
 
@@ -81,9 +90,15 @@ class ClipboardManager {
   private startClipboardMonitoring() {
     // Get initial clipboard content
     this.lastTextContent = clipboard.readText()
+    this.lastHtmlContent = clipboard.readHTML()
     console.log('Starting clipboard monitoring. Initial content:', this.lastTextContent?.substring(0, 50))
     
     this.pollInterval = setInterval(() => {
+      // Skip monitoring if we're in the middle of an internal copy
+      if (this.isInternalCopy) {
+        return
+      }
+
       let hasNewContent = false
       
       // Check for images first - images take priority over text
@@ -101,16 +116,42 @@ class ClipboardManager {
         }
       }
       
-      // Only check for text if no new image was found
+      // Check for text content - now we check for both plain text and HTML
       if (!hasNewContent) {
+        // First try to read HTML content (for rich text from apps like Notion)
+        const html = clipboard.readHTML()
         const text = clipboard.readText()
-        if (text && text !== this.lastTextContent) {
-          console.log('New text content detected:', text.substring(0, 50))
-          this.addToHistory(text, 'text')
-          this.lastTextContent = text
+        
+        // Only consider it HTML if:
+        // 1. HTML content exists and is not empty
+        // 2. HTML content is significantly different from plain text (not just wrapped)
+        // 3. HTML content contains actual HTML tags beyond basic wrapping
+        const isActualHTML = html && 
+                            html.trim() && 
+                            html !== text && 
+                            html.includes('<') && 
+                            html.includes('>') &&
+                            // Check if it's more than just basic wrapping (like <meta charset='utf-8'><p>text</p>)
+                            (html.match(/<[^>]+>/g) || []).length > 2
+        
+        const currentContent = isActualHTML ? html : text
+        const contentType = isActualHTML ? 'html' : 'text'
+        
+        // Check against both last text and last HTML to avoid duplicates
+        const lastContent = contentType === 'html' ? this.lastHtmlContent : this.lastTextContent
+        
+        if (currentContent && currentContent !== lastContent) {
+          console.log('New content detected:', contentType, currentContent.substring(0, 50))
+          this.addToHistory(currentContent, contentType as 'text' | 'html')
+          
+          if (contentType === 'html') {
+            this.lastHtmlContent = currentContent
+          } else {
+            this.lastTextContent = currentContent
+          }
         }
       }
-    }, 500)
+    }, 300) // Reduced interval for better responsiveness with Notion
   }
 
   private stopClipboardMonitoring() {
@@ -151,10 +192,14 @@ class ClipboardManager {
   }
 
   createTray() {
-    // Use a template image for better menu bar integration
+    // Create icon for menu bar with proper template image support
     const icon = nativeImage.createFromPath(join(__dirname, '../public/clipboard.png'))
-    icon.setTemplateImage(true) // This makes it adapt to dark/light menu bar
-    this.tray = new Tray(icon.resize({ width: 16, height: 16 }))
+    
+    // Ensure the icon is properly sized and set as template
+    const resizedIcon = icon.resize({ width: 16, height: 16 })
+    resizedIcon.setTemplateImage(true) // This makes it adapt to dark/light menu bar automatically
+    
+    this.tray = new Tray(resizedIcon)
     
     const contextMenu = Menu.buildFromTemplate([
       {
@@ -216,6 +261,9 @@ class ClipboardManager {
     })
 
     ipcMain.handle('copy-to-clipboard', (_, item: { content: string, type: string }) => {
+      // Set flag to prevent monitoring during internal copy
+      this.isInternalCopy = true
+      
       if (item.type === 'image') {
         // Extract base64 data and convert back to image
         const base64Data = item.content.replace('data:image/png;base64,', '')
@@ -223,10 +271,20 @@ class ClipboardManager {
         const image = nativeImage.createFromBuffer(imageBuffer)
         clipboard.writeImage(image)
         this.lastImageHash = createHash('md5').update(imageBuffer).digest('hex')
+      } else if (item.type === 'html') {
+        // Write both HTML and plain text for better compatibility
+        clipboard.writeHTML(item.content)
+        this.lastHtmlContent = item.content
+        this.lastTextContent = item.content // Also update text to avoid conflicts
       } else {
         clipboard.writeText(item.content)
         this.lastTextContent = item.content
       }
+      
+      // Reset flag after a short delay to allow the copy operation to complete
+      setTimeout(() => {
+        this.isInternalCopy = false
+      }, 100)
     })
 
     ipcMain.handle('delete-clipboard-item', (_, id: string) => {
