@@ -9,24 +9,38 @@ interface ClipboardItem {
   preview?: string
 }
 
+declare global {
+  interface Window {
+    electronAPI: {
+      getClipboardHistory: () => Promise<ClipboardItem[]>
+      copyToClipboard: (item: ClipboardItem) => Promise<void>
+      deleteClipboardItem: (id: string) => Promise<ClipboardItem[]>
+      clearClipboardHistory: () => Promise<ClipboardItem[]>
+      hideWindow: () => Promise<void>
+      getAutoPasteSetting: () => Promise<boolean>
+      setAutoPasteSetting: (enabled: boolean) => Promise<boolean>
+        onClipboardUpdated: (callback: (history: ClipboardItem[]) => void) => () => void
+        onPasteFeedback: (callback: (feedback: { success: boolean, message: string }) => void) => () => void
+    }
+  }
+}
+
 function App() {
   const [clipboardHistory, setClipboardHistory] = useState<ClipboardItem[]>([])
   const [searchTerm, setSearchTerm] = useState('')
   const [isLoading, setIsLoading] = useState(true)
+  const [autoPasteEnabled, setAutoPasteEnabled] = useState(true)
+  const [pasteMessage, setPasteMessage] = useState<{ success: boolean, message: string } | null>(null)
 
   useEffect(() => {
-    console.log('App component mounted')
-    console.log('window.electronAPI available:', !!window.electronAPI)
-    
     const loadHistory = async () => {
       try {
         if (window.electronAPI) {
-          console.log('Loading initial clipboard history...')
           const history = await window.electronAPI.getClipboardHistory()
-          console.log('Initial history loaded:', history.length, 'items')
           setClipboardHistory(history)
-        } else {
-          console.error('electronAPI not available on window object')
+          
+          const autoPaste = await window.electronAPI.getAutoPasteSetting()
+          setAutoPasteEnabled(autoPaste)
         }
       } catch (error) {
         console.error('Failed to load clipboard history:', error)
@@ -38,11 +52,19 @@ function App() {
     loadHistory()
 
     if (window.electronAPI) {
-      const unsubscribe = window.electronAPI.onClipboardUpdated((history: ClipboardItem[]) => {
-        console.log('Clipboard updated event received:', history.length, 'items')
+      const unsubscribeClipboard = window.electronAPI.onClipboardUpdated((history: ClipboardItem[]) => {
         setClipboardHistory(history)
       })
-      return unsubscribe
+      
+      const unsubscribePaste = window.electronAPI.onPasteFeedback((feedback: { success: boolean, message: string }) => {
+        setPasteMessage(feedback)
+        setTimeout(() => setPasteMessage(null), 3000)
+      })
+      
+      return () => {
+        unsubscribeClipboard()
+        unsubscribePaste()
+      }
     }
   }, [])
 
@@ -57,7 +79,7 @@ function App() {
     try {
       if (window.electronAPI) {
         await window.electronAPI.copyToClipboard(item)
-        await window.electronAPI.hideWindow()
+        // Don't call hideWindow here - the main process handles it
       }
     } catch (error) {
       console.error('Failed to copy item:', error)
@@ -97,6 +119,17 @@ function App() {
     return date.toLocaleDateString()
   }
 
+  const handleToggleAutoPaste = async () => {
+    try {
+      if (window.electronAPI) {
+        const newSetting = await window.electronAPI.setAutoPasteSetting(!autoPasteEnabled)
+        setAutoPasteEnabled(newSetting)
+      }
+    } catch (error) {
+      console.error('Failed to toggle auto-paste:', error)
+    }
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape' && window.electronAPI) {
       window.electronAPI.hideWindow()
@@ -126,11 +159,25 @@ function App() {
           />
         </div>
         <div className="header-actions">
+          <label className="auto-paste-toggle">
+            <input
+              type="checkbox"
+              checked={autoPasteEnabled}
+              onChange={handleToggleAutoPaste}
+            />
+            Auto-paste
+          </label>
           <button onClick={handleClearHistory} className="clear-button">
             Clear All
           </button>
         </div>
       </div>
+
+      {pasteMessage && (
+        <div className={`paste-feedback ${pasteMessage.success ? 'success' : 'error'}`}>
+          {pasteMessage.message}
+        </div>
+      )}
 
       <div className="clipboard-list">
         {filteredHistory.length === 0 ? (

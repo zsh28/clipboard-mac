@@ -2,6 +2,7 @@ import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, Menu, Tray, nat
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { createHash } from 'crypto'
+import { execSync } from 'child_process'
 import Store from 'electron-store'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -16,7 +17,7 @@ interface ClipboardItem {
 }
 
 class ClipboardManager {
-  private store: Store<{ history: ClipboardItem[] }>
+  private store: Store<{ history: ClipboardItem[], autoPaste: boolean }>
   private mainWindow: BrowserWindow | null = null
   private tray: Tray | null = null
   private clipboardHistory: ClipboardItem[] = []
@@ -25,15 +26,131 @@ class ClipboardManager {
   private lastHtmlContent: string = ''
   private pollInterval: NodeJS.Timeout | null = null
   private isInternalCopy: boolean = false
+  private autoPasteEnabled: boolean = true
+  private previousActiveApp: string = ''
 
   constructor() {
-    this.store = new Store<{ history: ClipboardItem[] }>({
+    this.store = new Store<{ history: ClipboardItem[], autoPaste: boolean }>({
       name: 'clipboard-history',
       defaults: {
-        history: [] as ClipboardItem[]
+        history: [] as ClipboardItem[],
+        autoPaste: true
       }
     })
     this.loadHistory()
+    this.autoPasteEnabled = this.store.get('autoPaste', true)
+  }
+
+  private checkIfTextFieldActive(): boolean {
+    try {
+      if (process.platform === 'darwin') {
+        const result = execSync(`osascript -e 'tell application "System Events" to get focused of UI element 1 of process "${this.previousActiveApp}"'`).toString().trim()
+        return result === 'true'
+      }
+    } catch {
+      return true
+    }
+    return true
+  }
+
+  private simulatePaste() {
+    try {
+      setTimeout(() => {
+        if (process.platform === 'darwin') {
+          try {
+            if (this.previousActiveApp && this.previousActiveApp !== 'Clipboard Manager') {
+              try {
+                execSync(`osascript -e 'tell application "${this.previousActiveApp}" to activate'`)
+                
+                setTimeout(() => {
+                  try {
+                    this.checkIfTextFieldActive()
+                    execSync(`osascript -e 'tell application "System Events" to keystroke "v" using command down'`)
+                    
+                    if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+                      this.mainWindow.webContents.send('paste-feedback', { 
+                        success: true, 
+                        message: 'Content pasted successfully' 
+                      })
+                    }
+                   } catch {
+                     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+                       this.mainWindow.webContents.send('paste-feedback', { 
+                         success: false, 
+                         message: 'Paste operation failed - ensure a text field is active' 
+                       })
+                     }
+                   }
+                }, 500)
+               } catch {
+                 try {
+                   execSync(`osascript -e 'tell application "System Events" to keystroke "v" using command down'`)
+                   
+                   if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+                     this.mainWindow.webContents.send('paste-feedback', { 
+                       success: true, 
+                       message: 'Content pasted (fallback method)' 
+                     })
+                   }
+                 } catch {
+                   if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+                     this.mainWindow.webContents.send('paste-feedback', { 
+                       success: false, 
+                       message: 'Paste failed - please try pasting manually (Cmd+V)' 
+                     })
+                   }
+                 }
+               }
+            } else {
+              const frontAppResult = execSync(`osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true'`).toString().trim()
+              
+              if (frontAppResult === "Finder") {
+                return
+              }
+              
+              execSync(`osascript -e 'tell application "System Events" to keystroke "v" using command down'`)
+              
+              if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+                this.mainWindow.webContents.send('paste-feedback', { 
+                  success: true, 
+                  message: 'Content pasted successfully' 
+                })
+              }
+            }
+            
+          } catch {
+            // Silent error handling
+          }
+        } else if (process.platform === 'win32') {
+          try {
+            execSync(`powershell -command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^v')"`)
+          } catch {
+            // Silent error handling
+          }
+        } else {
+          try {
+            execSync('xdotool key ctrl+v')
+          } catch {
+            // Silent error handling
+          }
+        }
+      }, 300)
+    } catch {
+      // Silent error handling
+    }
+  }
+
+  private storePreviousActiveApp() {
+    if (process.platform === 'darwin') {
+      try {
+        const frontApp = execSync(`osascript -e 'tell application "System Events" to return name of first application process whose frontmost is true'`).toString().trim()
+        if (frontApp !== 'Clipboard Manager') {
+          this.previousActiveApp = frontApp
+        }
+      } catch  {
+        // Silent error handling
+      }
+    }
   }
 
   private loadHistory() {
@@ -47,22 +164,16 @@ class ClipboardManager {
   private addToHistory(content: string, type: 'text' | 'image' | 'html') {
     if (!content) return
 
-    // Skip if this is an internal copy operation
     if (this.isInternalCopy) {
-      console.log('Skipping internal copy operation')
       return
     }
 
-    // Check if this content is identical to any of the recent items (check top 3)
     const recentItems = this.clipboardHistory.slice(0, 3)
     for (const item of recentItems) {
       if (item.content === content && item.type === type) {
-        console.log('Skipping duplicate content')
         return
       }
     }
-
-    console.log('Adding to history:', type === 'image' ? 'Image data' : content.substring(0, 50), 'Type:', type)
 
     const item: ClipboardItem = {
       id: Date.now().toString(),
@@ -71,7 +182,7 @@ class ClipboardManager {
       timestamp: Date.now(),
       preview: type === 'text' ? content.substring(0, 100) : 
                type === 'image' ? 'Image' : 
-               type === 'html' ? content.replace(/<[^>]*>/g, '').substring(0, 100) : // Strip HTML tags for preview
+               type === 'html' ? content.replace(/<[^>]*>/g, '').substring(0, 100) :
                `${type} content`
     }
 
@@ -79,36 +190,28 @@ class ClipboardManager {
     this.clipboardHistory = this.clipboardHistory.slice(0, 100)
     this.saveHistory()
 
-    console.log('History updated. Total items:', this.clipboardHistory.length)
-
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      console.log('Sending update to renderer')
       this.mainWindow.webContents.send('clipboard-updated', this.clipboardHistory)
     }
   }
 
   private startClipboardMonitoring() {
-    // Get initial clipboard content
     this.lastTextContent = clipboard.readText()
     this.lastHtmlContent = clipboard.readHTML()
-    console.log('Starting clipboard monitoring. Initial content:', this.lastTextContent?.substring(0, 50))
     
     this.pollInterval = setInterval(() => {
-      // Skip monitoring if we're in the middle of an internal copy
       if (this.isInternalCopy) {
         return
       }
 
       let hasNewContent = false
       
-      // Check for images first - images take priority over text
       const image = clipboard.readImage()
       if (!image.isEmpty()) {
         const imageBuffer = image.toPNG()
         const imageHash = createHash('md5').update(imageBuffer).digest('hex')
         
         if (imageHash !== this.lastImageHash) {
-          console.log('New image content detected')
           const imageBase64 = `data:image/png;base64,${imageBuffer.toString('base64')}`
           this.addToHistory(imageBase64, 'image')
           this.lastImageHash = imageHash
@@ -116,32 +219,23 @@ class ClipboardManager {
         }
       }
       
-      // Check for text content - now we check for both plain text and HTML
       if (!hasNewContent) {
-        // First try to read HTML content (for rich text from apps like Notion)
         const html = clipboard.readHTML()
         const text = clipboard.readText()
         
-        // Only consider it HTML if:
-        // 1. HTML content exists and is not empty
-        // 2. HTML content is significantly different from plain text (not just wrapped)
-        // 3. HTML content contains actual HTML tags beyond basic wrapping
         const isActualHTML = html && 
                             html.trim() && 
                             html !== text && 
                             html.includes('<') && 
                             html.includes('>') &&
-                            // Check if it's more than just basic wrapping (like <meta charset='utf-8'><p>text</p>)
                             (html.match(/<[^>]+>/g) || []).length > 2
         
         const currentContent = isActualHTML ? html : text
         const contentType = isActualHTML ? 'html' : 'text'
         
-        // Check against both last text and last HTML to avoid duplicates
         const lastContent = contentType === 'html' ? this.lastHtmlContent : this.lastTextContent
         
         if (currentContent && currentContent !== lastContent) {
-          console.log('New content detected:', contentType, currentContent.substring(0, 50))
           this.addToHistory(currentContent, contentType as 'text' | 'html')
           
           if (contentType === 'html') {
@@ -151,7 +245,7 @@ class ClipboardManager {
           }
         }
       }
-    }, 300) // Reduced interval for better responsiveness with Notion
+    }, 300)
   }
 
   private stopClipboardMonitoring() {
@@ -227,6 +321,8 @@ class ClipboardManager {
 
   showWindow() {
     if (this.mainWindow) {
+      // Store the current active app before showing our window
+      this.storePreviousActiveApp()
       this.mainWindow.show()
       this.mainWindow.focus()
       this.mainWindow.webContents.send('clipboard-updated', this.clipboardHistory)
@@ -261,30 +357,32 @@ class ClipboardManager {
     })
 
     ipcMain.handle('copy-to-clipboard', (_, item: { content: string, type: string }) => {
-      // Set flag to prevent monitoring during internal copy
       this.isInternalCopy = true
       
       if (item.type === 'image') {
-        // Extract base64 data and convert back to image
         const base64Data = item.content.replace('data:image/png;base64,', '')
         const imageBuffer = Buffer.from(base64Data, 'base64')
         const image = nativeImage.createFromBuffer(imageBuffer)
         clipboard.writeImage(image)
         this.lastImageHash = createHash('md5').update(imageBuffer).digest('hex')
       } else if (item.type === 'html') {
-        // Write both HTML and plain text for better compatibility
         clipboard.writeHTML(item.content)
         this.lastHtmlContent = item.content
-        this.lastTextContent = item.content // Also update text to avoid conflicts
+        this.lastTextContent = item.content
       } else {
         clipboard.writeText(item.content)
         this.lastTextContent = item.content
       }
       
-      // Reset flag after a short delay to allow the copy operation to complete
       setTimeout(() => {
         this.isInternalCopy = false
       }, 100)
+
+      this.hideWindow()
+      
+      if (this.autoPasteEnabled) {
+        this.simulatePaste()
+      }
     })
 
     ipcMain.handle('delete-clipboard-item', (_, id: string) => {
@@ -300,6 +398,16 @@ class ClipboardManager {
 
     ipcMain.handle('hide-window', () => {
       this.hideWindow()
+    })
+
+    ipcMain.handle('get-auto-paste-setting', () => {
+      return this.autoPasteEnabled
+    })
+
+    ipcMain.handle('set-auto-paste-setting', (_, enabled: boolean) => {
+      this.autoPasteEnabled = enabled
+      this.store.set('autoPaste', enabled)
+      return enabled
     })
   }
 
